@@ -1,0 +1,150 @@
+# Reference copy of the grafana/k8s-monitoring Helm values.
+# setup.sh embeds these directly as a heredoc passed to helm --values -,
+# so this file is documentation only and is not read by any script.
+#
+# Shell substitutions applied by setup.sh (unquoted heredoc):
+#   ${CLUSTER}                     → GKE_CLUSTER env var
+#   ${GRAFANA_CLOUD_OTLP_URL}      → OTLP gateway URL
+#   ${GRAFANA_CLOUD_OTLP_USERNAME} → OTLP instance ID
+#   ${GRAFANA_CLOUD_API_KEY}       → Grafana Cloud API token
+# All other credentials are embedded literals from the Cloud integration wizard.
+
+cluster:
+  name: my-cluster   # → ${CLUSTER}
+
+destinations:
+  grafana-cloud-metrics:
+    type: prometheus
+    url: https://prometheus-prod-36-prod-us-west-0.grafana.net./api/prom/push
+    auth:
+      type: basic
+      username: "2619685"
+      password: <GRAFANA_CLOUD_API_KEY>
+  grafana-cloud-logs:
+    type: loki
+    url: https://logs-prod-021.grafana.net./loki/api/v1/push
+    auth:
+      type: basic
+      username: "1305519"
+      password: <GRAFANA_CLOUD_API_KEY>
+  # Credentials supplied via env vars in setup.sh
+  gc-otlp-endpoint:
+    type: otlp
+    url: "${GRAFANA_CLOUD_OTLP_URL}"
+    protocol: http
+    auth:
+      type: basic
+      username: "${GRAFANA_CLOUD_OTLP_USERNAME}"
+      password: "${GRAFANA_CLOUD_API_KEY}"
+    metrics:
+      enabled: true
+    logs:
+      enabled: true
+    traces:
+      enabled: true
+  grafana-cloud-profiles:
+    type: pyroscope
+    url: https://profiles-prod-008.grafana.net.:443
+    auth:
+      type: basic
+      username: "1347725"
+      password: <GRAFANA_CLOUD_API_KEY>
+
+clusterMetrics:
+  enabled: true
+  collector: alloy-metrics
+hostMetrics:
+  enabled: true
+  collector: alloy-metrics
+  linuxHosts:
+    enabled: true
+  windowsHosts:
+    enabled: true
+  energyMetrics:
+    enabled: true
+costMetrics:
+  enabled: true
+  collector: alloy-metrics
+clusterEvents:
+  enabled: true
+  collector: alloy-singleton
+podLogsViaLoki:
+  enabled: true
+  collector: alloy-logs
+
+# In-cluster OTLP receiver — demo app and OpenLIT SDK send here;
+# alloy-receiver forwards traces to gc-otlp-endpoint (Tempo/Mimir).
+applicationObservability:
+  enabled: true
+  collector: alloy-receiver
+  receivers:
+    otlp:
+      grpc:
+        enabled: true
+        port: 4317
+      http:
+        enabled: true
+        port: 4318
+    zipkin:
+      enabled: true
+      port: 9411
+
+autoInstrumentation:
+  enabled: true
+  collector: alloy-metrics
+  beyla:
+    deliverTracesToApplicationObservability: true
+
+profiling:
+  enabled: true
+  collector: alloy-profiles
+
+collectors:
+  alloy-metrics:
+    presets:
+      - clustered
+      - statefulset
+  alloy-singleton:
+    presets:
+      - singleton
+  alloy-logs:
+    presets:
+      - filesystem-log-reader
+      - daemonset
+  alloy-receiver:
+    presets:
+      - deployment
+  alloy-profiles:
+    presets:
+      - privileged
+      - daemonset
+
+collectorCommon:
+  alloy:
+    remoteConfig:
+      enabled: true
+      url: https://fleet-management-prod-014.grafana.net
+      auth:
+        type: basic
+        username: "1347725"
+        password: <GRAFANA_CLOUD_API_KEY>
+
+telemetryServices:
+  kube-state-metrics:
+    deploy: true
+  node-exporter:
+    deploy: true
+  windows-exporter:
+    deploy: true
+  opencost:
+    deploy: true
+    metricsSource: grafana-cloud-metrics
+    opencost:
+      exporter:
+        defaultClusterId: my-cluster   # → ${CLUSTER}
+      prometheus:
+        existingSecretName: grafana-cloud-metrics-grafana-k8s-monitoring
+        external:
+          url: https://prometheus-prod-36-prod-us-west-0.grafana.net./api/prom
+  kepler:
+    deploy: true

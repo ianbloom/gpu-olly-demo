@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-generator
+  namespace: ai-demo
+  labels:
+    app: load-generator
+    app.kubernetes.io/part-of: gke-gpu-ai-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: load-generator
+  template:
+    metadata:
+      labels:
+        app: load-generator
+    spec:
+      containers:
+        - name: locust
+          # Replace with your registry path after building
+          image: REGISTRY/load-generator:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8089
+              name: locust-ui
+          env:
+            - name: TARGET_HOST
+              value: "http://gpu-inference.ai-demo.svc.cluster.local"
+            - name: LOCUST_USERS
+              value: "30"
+            - name: LOCUST_SPAWN_RATE
+              value: "3"
+            # Set to "0" to run indefinitely
+            - name: LOCUST_RUN_TIME
+              value: "0"
+            # opentelemetry-instrument zero-code configuration
+            - name: OTEL_SERVICE_NAME
+              value: "load-generator"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "ALLOY_OTLP_HTTP_ENDPOINT"
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "http/protobuf"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_METRICS_EXPORTER
+              value: "otlp"
+            - name: OTEL_LOGS_EXPORTER
+              value: "otlp"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: load-generator
+  namespace: ai-demo
+  labels:
+    app: load-generator
+spec:
+  selector:
+    app: load-generator
+  ports:
+    - name: locust-ui
+      port: 8089
+      targetPort: 8089
+  # Change to LoadBalancer if you want to access the Locust UI externally
+  type: ClusterIP

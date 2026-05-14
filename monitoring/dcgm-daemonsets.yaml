@@ -1,0 +1,163 @@
+# GKE-compatible NVIDIA DCGM deployment following Google's official guidance:
+# https://cloud.google.com/stackdriver/docs/managed-prometheus/exporters/nvidia-dcgm
+#
+# Two DaemonSets are required on GKE because the dcgm-exporter cannot run in
+# standalone (embedded) mode — it must connect to a separately-running nv-hostengine.
+#
+#   nvidia-dcgm          → runs nv-hostengine on hostPort 5555
+#   nvidia-dcgm-exporter → connects via --remote-hostengine-info $(NODE_IP)
+#                          exposes Prometheus metrics on :9400
+
+# ── DCGM Host Engine ──────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-dcgm
+  namespace: gpu-operator
+  labels:
+    app: nvidia-dcgm
+    app.kubernetes.io/part-of: gke-gpu-ai-demo
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-dcgm
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: nvidia-dcgm
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: cloud.google.com/gke-accelerator
+                    operator: Exists
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: nvidia-install-dir-host
+          hostPath:
+            path: /home/kubernetes/bin/nvidia
+            type: Directory
+      containers:
+        - name: nvidia-dcgm
+          image: nvcr.io/nvidia/cloud-native/dcgm:3.3.0-1-ubuntu22.04
+          command: ["nv-hostengine", "-n", "-b", "ALL"]
+          ports:
+            - containerPort: 5555
+              hostPort: 5555
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: nvidia-install-dir-host
+              mountPath: /usr/local/nvidia
+---
+# ── DCGM Exporter Metrics ConfigMap ──────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-dcgm-exporter-metrics
+  namespace: gpu-operator
+data:
+  counters.csv: |
+    # Utilization
+    DCGM_FI_DEV_GPU_UTIL,       gauge, GPU utilization (in %).
+    DCGM_FI_DEV_MEM_COPY_UTIL,  gauge, Memory utilization (in %).
+
+    # Temperature and power
+    DCGM_FI_DEV_GPU_TEMP,    gauge, GPU temperature (degrees C).
+    DCGM_FI_DEV_MEMORY_TEMP, gauge, Memory temperature.
+    DCGM_FI_DEV_POWER_USAGE, gauge, Power draw (Watts).
+
+    # Framebuffer memory
+    DCGM_FI_DEV_FB_FREE,  gauge, Framebuffer free (MiB).
+    DCGM_FI_DEV_FB_USED,  gauge, Framebuffer used (MiB).
+    DCGM_FI_DEV_FB_TOTAL, gauge, Framebuffer total (MiB).
+
+    # PCIe throughput
+    DCGM_FI_DEV_PCIE_TX_THROUGHPUT, gauge, PCIe TX throughput (KB/s).
+    DCGM_FI_DEV_PCIE_RX_THROUGHPUT, gauge, PCIe RX throughput (KB/s).
+
+    # ECC errors
+    DCGM_FI_DEV_ECC_SBE_VOL_TOTAL, gauge, Total single-bit ECC errors.
+    DCGM_FI_DEV_ECC_DBE_VOL_TOTAL, gauge, Total double-bit ECC errors.
+---
+# ── DCGM Exporter ─────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-dcgm-exporter
+  namespace: gpu-operator
+  labels:
+    app.kubernetes.io/name: dcgm-exporter
+    app.kubernetes.io/part-of: gke-gpu-ai-demo
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dcgm-exporter
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dcgm-exporter
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: cloud.google.com/gke-accelerator
+                    operator: Exists
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: nvidia-dcgm-exporter-metrics
+          configMap:
+            name: nvidia-dcgm-exporter-metrics
+        - name: nvidia-install-dir-host
+          hostPath:
+            path: /home/kubernetes/bin/nvidia
+            type: Directory
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+      containers:
+        - name: nvidia-dcgm-exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.0-3.2.0-ubuntu22.04
+          command: ["/bin/bash", "-c"]
+          args:
+            - "hostname $NODE_NAME; dcgm-exporter --remote-hostengine-info $(NODE_IP) --collectors /etc/dcgm-exporter/counters.csv"
+          ports:
+            - name: metrics
+              containerPort: 9400
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: LD_LIBRARY_PATH
+              value: /usr/local/nvidia/lib64
+            - name: DCGM_EXPORTER_KUBERNETES
+              value: "true"
+            - name: DCGM_EXPORTER_KUBERNETES_GPU_ID_TYPE
+              value: "device-name"
+            - name: DCGM_EXPORTER_LISTEN
+              value: ":9400"
+          volumeMounts:
+            - name: nvidia-dcgm-exporter-metrics
+              mountPath: /etc/dcgm-exporter
+              readOnly: true
+            - name: nvidia-install-dir-host
+              mountPath: /usr/local/nvidia
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources

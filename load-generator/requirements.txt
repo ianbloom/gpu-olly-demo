@@ -1,0 +1,2 @@
+locust==2.31.3
+opentelemetry-distro[otlp]==0.48b0
