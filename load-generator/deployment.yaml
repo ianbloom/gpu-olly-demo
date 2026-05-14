@@ -34,19 +34,6 @@ spec:
             # Set to "0" to run indefinitely
             - name: LOCUST_RUN_TIME
               value: "0"
-            # opentelemetry-instrument zero-code configuration
-            - name: OTEL_SERVICE_NAME
-              value: "load-generator"
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "ALLOY_OTLP_HTTP_ENDPOINT"
-            - name: OTEL_EXPORTER_OTLP_PROTOCOL
-              value: "http/protobuf"
-            - name: OTEL_TRACES_EXPORTER
-              value: "otlp"
-            - name: OTEL_METRICS_EXPORTER
-              value: "otlp"
-            - name: OTEL_LOGS_EXPORTER
-              value: "otlp"
           resources:
             requests:
               cpu: "250m"

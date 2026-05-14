@@ -43,6 +43,13 @@ spec:
               value: "true"
             - name: LD_LIBRARY_PATH
               value: "/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
+            # Grafana Sigil SDK — structured LLM generation telemetry
+            - name: SIGIL_ENDPOINT
+              value: "SIGIL_ENDPOINT_PLACEHOLDER"
+            - name: SIGIL_AUTH_TENANT_ID
+              value: "SIGIL_TENANT_ID_PLACEHOLDER"
+            - name: SIGIL_AUTH_TOKEN
+              value: "SIGIL_TOKEN_PLACEHOLDER"
           resources:
             requests:
               cpu: "2"

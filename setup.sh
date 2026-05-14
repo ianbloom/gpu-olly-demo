@@ -39,6 +39,9 @@ REQUIRED_VARS=(
   GRAFANA_CLOUD_PYROSCOPE_USERNAME
   GRAFANA_FLEET_URL
   GRAFANA_FLEET_USERNAME
+  SIGIL_ENDPOINT
+  SIGIL_AUTH_TENANT_ID
+  SIGIL_AUTH_TOKEN
 )
 missing=()
 for var in "${REQUIRED_VARS[@]}"; do
@@ -87,6 +90,9 @@ sed -i.bak \
   -e "s|REGISTRY|${REGISTRY}|g" \
   -e "s|GRAFANA_CLOUD_OTLP_URL_PLACEHOLDER|${GRAFANA_CLOUD_OTLP_URL}|g" \
   -e "s|GRAFANA_CLOUD_OTLP_AUTH_PLACEHOLDER|${GRAFANA_CLOUD_OTLP_AUTH}|g" \
+  -e "s|SIGIL_ENDPOINT_PLACEHOLDER|${SIGIL_ENDPOINT}|g" \
+  -e "s|SIGIL_TENANT_ID_PLACEHOLDER|${SIGIL_AUTH_TENANT_ID}|g" \
+  -e "s|SIGIL_TOKEN_PLACEHOLDER|${SIGIL_AUTH_TOKEN}|g" \
   app/deployment.yaml.deploy \
   load-generator/deployment.yaml.deploy
 rm -f app/deployment.yaml.deploy.bak load-generator/deployment.yaml.deploy.bak

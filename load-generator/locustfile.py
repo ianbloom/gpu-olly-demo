@@ -1,10 +1,12 @@
 """
 Locust load generator for the GPU inference demo service.
 Sends a realistic mix of short, medium, and long prompts.
+Each simulated user maintains a persistent conversation_id so
+multi-turn sessions appear grouped in Grafana AI Observability.
 """
+import uuid
 import random
-from locust import HttpUser, task, between, events
-from locust.runners import MasterRunner
+from locust import HttpUser, task, between
 
 SHORT_PROMPTS = [
     "What is machine learning?",
@@ -42,41 +44,34 @@ LONG_PROMPTS = [
 class InferenceUser(HttpUser):
     wait_time = between(0.5, 2.0)
 
-    @task(5)
-    def generate_short(self):
+    def on_start(self):
+        # One stable conversation ID per simulated user — groups all turns
+        # from this user into a single conversation in Grafana AI Observability.
+        self.conversation_id = str(uuid.uuid4())
+
+    def _post(self, prompt: str, max_tokens: int, name: str):
         self.client.post(
             "/generate",
             json={
-                "prompt": random.choice(SHORT_PROMPTS),
-                "max_tokens": random.randint(64, 128),
-                "temperature": round(random.uniform(0.3, 1.0), 2),
+                "prompt":          prompt,
+                "max_tokens":      max_tokens,
+                "temperature":     round(random.uniform(0.3, 1.0), 2),
+                "conversation_id": self.conversation_id,
             },
-            name="/generate [short]",
+            name=name,
         )
+
+    @task(5)
+    def generate_short(self):
+        self._post(random.choice(SHORT_PROMPTS), random.randint(64, 128), "/generate [short]")
 
     @task(3)
     def generate_medium(self):
-        self.client.post(
-            "/generate",
-            json={
-                "prompt": random.choice(MEDIUM_PROMPTS),
-                "max_tokens": random.randint(128, 256),
-                "temperature": round(random.uniform(0.5, 0.9), 2),
-            },
-            name="/generate [medium]",
-        )
+        self._post(random.choice(MEDIUM_PROMPTS), random.randint(128, 256), "/generate [medium]")
 
     @task(2)
     def generate_long(self):
-        self.client.post(
-            "/generate",
-            json={
-                "prompt": random.choice(LONG_PROMPTS),
-                "max_tokens": random.randint(256, 512),
-                "temperature": round(random.uniform(0.6, 0.8), 2),
-            },
-            name="/generate [long]",
-        )
+        self._post(random.choice(LONG_PROMPTS), random.randint(256, 512), "/generate [long]")
 
     @task(1)
     def healthcheck(self):

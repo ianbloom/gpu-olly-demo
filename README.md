@@ -113,6 +113,12 @@ export GRAFANA_CLOUD_PYROSCOPE_USERNAME="123456"
 # Fleet management (Alloy remote config)
 export GRAFANA_FLEET_URL="https://fleet-management-prod-XXX.grafana.net"
 export GRAFANA_FLEET_USERNAME="123456"
+
+# Grafana Sigil SDK — structured LLM generation telemetry
+# Token requires sigil:write scope in Grafana Cloud access policy
+export SIGIL_ENDPOINT="https://sigil-prod-XXX.grafana.net"
+export SIGIL_AUTH_TENANT_ID="123456"   # Grafana Cloud stack/instance ID
+export SIGIL_AUTH_TOKEN="glc_eyJ..."   # API token with sigil:write scope
 ```
 
 > **Tip**: save these to a `.env` file (already git-ignored) and `source .env` before running setup.

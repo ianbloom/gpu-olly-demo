@@ -1,22 +1,30 @@
 """
 GPU Inference Demo Service
 Simulates an LLM inference workload on NVIDIA GPUs using PyTorch.
-OpenLIT is initialized at module level and handles all telemetry —
-traces, metrics, logs, and GPU stats — via OTLP to the Alloy receiver.
+
+Telemetry:
+  - OpenLIT SDK: GPU stats + GenAI semantic-convention spans/metrics via OTLP
+  - Grafana Sigil SDK: structured LLM generation records (input/output messages,
+    token usage, latency) sent to Grafana AI Observability
+  - Both use OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_HEADERS for traces/metrics
 """
 import os
+import uuid
 import time
 import random
 import asyncio
 import logging
 from contextlib import asynccontextmanager
 
+import base64
+import httpx
 import openlit
+from datetime import datetime, timezone
+from opentelemetry.trace import format_trace_id, format_span_id
 
 import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from opentelemetry import trace, metrics
 
@@ -26,12 +34,51 @@ logger = logging.getLogger(__name__)
 SERVICE_NAME = os.getenv("SERVICE_NAME", "gpu-inference-demo")
 MODEL_NAME   = os.getenv("MODEL_NAME", "demo-llm-7b")
 
+# ── OpenLIT — GPU stats + GenAI OTel instrumentation ──────────────────────────
 openlit.init(
     collect_gpu_stats=True,
     environment="production",
     application_name=SERVICE_NAME,
 )
 
+# ── Sigil — direct HTTP to Generation Ingest API ──────────────────────────────
+_sigil_endpoint  = os.getenv("SIGIL_ENDPOINT", "").rstrip("/")
+_sigil_tenant_id = os.getenv("SIGIL_AUTH_TENANT_ID", "")
+_sigil_token     = os.getenv("SIGIL_AUTH_TOKEN", "")
+
+if _sigil_endpoint and _sigil_tenant_id and _sigil_token:
+    _sigil_auth = base64.b64encode(
+        f"{_sigil_tenant_id}:{_sigil_token}".encode()
+    ).decode()
+    _sigil_headers = {
+        "Authorization": f"Basic {_sigil_auth}",
+        "X-Scope-OrgID": _sigil_tenant_id,
+        "Content-Type":  "application/json",
+    }
+    _sigil_url = f"{_sigil_endpoint}/api/v1/generations:export"
+    logger.info("Sigil generation ingest configured: %s", _sigil_url)
+else:
+    _sigil_url     = ""
+    _sigil_headers = {}
+    logger.warning(
+        "Sigil not configured (SIGIL_ENDPOINT / SIGIL_AUTH_TENANT_ID / "
+        "SIGIL_AUTH_TOKEN not set) — generation telemetry disabled"
+    )
+
+
+async def export_generation(payload: dict) -> None:
+    """Fire-and-forget POST to the Sigil generation ingest API."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.post(_sigil_url, json=payload, headers=_sigil_headers)
+        if resp.status_code not in (200, 202):
+            logger.warning("Sigil export failed: %s %s", resp.status_code, resp.text[:200])
+        else:
+            logger.debug("Sigil export accepted: %s", resp.text[:100])
+    except Exception as exc:
+        logger.warning("Sigil export error: %s", exc)
+
+# ── OTel tracer + meter (providers configured by OpenLIT above) ───────────────
 tracer = trace.get_tracer(__name__)
 meter  = metrics.get_meter(__name__)
 
@@ -40,9 +87,7 @@ request_counter  = meter.create_counter("gen_ai.requests",           unit="reque
 token_counter    = meter.create_counter("gen_ai.tokens",             unit="tokens")
 request_duration = meter.create_histogram("gen_ai.request.duration", unit="ms")
 
-# ---------------------------------------------------------------------------
-# GPU setup
-# ---------------------------------------------------------------------------
+# ── GPU setup ─────────────────────────────────────────────────────────────────
 DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 GPU_AVAILABLE = torch.cuda.is_available()
 
@@ -64,9 +109,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="GPU Inference Demo", lifespan=lifespan)
 
-# ---------------------------------------------------------------------------
-# Fake vocabulary for synthetic completions
-# ---------------------------------------------------------------------------
+# ── Fake vocabulary for synthetic completions ─────────────────────────────────
 VOCAB = [
     "the", "model", "predicts", "that", "neural", "networks", "learn",
     "representations", "of", "data", "using", "gradient", "descent",
@@ -95,13 +138,12 @@ def simulate_gpu_inference(batch_size: int, seq_len: int, hidden_dim: int = 2048
             torch.cuda.synchronize()
     return (time.perf_counter() - start) * 1000, ffn
 
-# ---------------------------------------------------------------------------
-# Request models
-# ---------------------------------------------------------------------------
+# ── Request / response models ─────────────────────────────────────────────────
 class GenerateRequest(BaseModel):
     prompt: str
     max_tokens: int = 256
     temperature: float = 0.7
+    conversation_id: str = ""   # optional — groups turns in Sigil
 
 class GenerateResponse(BaseModel):
     completion: str
@@ -112,9 +154,7 @@ class GenerateResponse(BaseModel):
     model: str
     device: str
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+# ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok", "gpu": GPU_AVAILABLE, "device": str(DEVICE)}
@@ -134,19 +174,23 @@ async def generate(req: GenerateRequest):
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt must not be empty")
 
-    prompt_tokens = len(req.prompt.split())
-    seq_len = min(prompt_tokens + req.max_tokens, 512)
+    prompt_tokens   = len(req.prompt.split())
+    seq_len         = min(prompt_tokens + req.max_tokens, 512)
+    conversation_id = req.conversation_id or str(uuid.uuid4())
+    generation_id   = str(uuid.uuid4())
+    gen_start_dt    = datetime.now(timezone.utc)
 
     with tracer.start_as_current_span("llm.generate") as span:
-        span.set_attribute("gen_ai.system",               "demo-llm")
-        span.set_attribute("gen_ai.request.model",        MODEL_NAME)
-        span.set_attribute("gen_ai.request.max_tokens",   req.max_tokens)
-        span.set_attribute("gen_ai.request.temperature",  req.temperature)
-        span.set_attribute("llm.prompt_tokens",           prompt_tokens)
+        span.set_attribute("gen_ai.system",              "demo-llm")
+        span.set_attribute("gen_ai.request.model",       MODEL_NAME)
+        span.set_attribute("gen_ai.request.max_tokens",  req.max_tokens)
+        span.set_attribute("gen_ai.request.temperature", req.temperature)
+        span.set_attribute("llm.prompt_tokens",          prompt_tokens)
 
         latency_ms, _ = await asyncio.get_event_loop().run_in_executor(
             None, simulate_gpu_inference, 1, seq_len
         )
+        gen_end_dt = datetime.now(timezone.utc)
 
         completion, completion_tokens = generate_completion(req.prompt, req.max_tokens)
         total_tokens = prompt_tokens + completion_tokens
@@ -155,10 +199,35 @@ async def generate(req: GenerateRequest):
         span.set_attribute("gen_ai.usage.completion_tokens", completion_tokens)
         span.set_attribute("gen_ai.response.model",          MODEL_NAME)
 
-        request_counter.add(1,                {"model": MODEL_NAME, "status": "success"})
-        token_counter.add(prompt_tokens,      {"model": MODEL_NAME, "type": "prompt"})
-        token_counter.add(completion_tokens,  {"model": MODEL_NAME, "type": "completion"})
-        request_duration.record(latency_ms,   {"model": MODEL_NAME})
+        request_counter.add(1,               {"model": MODEL_NAME, "status": "success"})
+        token_counter.add(prompt_tokens,     {"model": MODEL_NAME, "type": "prompt"})
+        token_counter.add(completion_tokens, {"model": MODEL_NAME, "type": "completion"})
+        request_duration.record(latency_ms,  {"model": MODEL_NAME})
+
+        # ── Sigil generation record ────────────────────────────────────────────
+        if _sigil_url:
+            span_ctx = span.get_span_context()
+            asyncio.ensure_future(export_generation({
+                "generations": [{
+                    "id":              generation_id,
+                    "conversation_id": conversation_id,
+                    "agent_name":      SERVICE_NAME,
+                    "agent_version":   "1.0.0",
+                    "mode":            "SYNC",
+                    "model":           {"provider": "demo", "name": MODEL_NAME},
+                    "trace_id":        format_trace_id(span_ctx.trace_id),
+                    "span_id":         format_span_id(span_ctx.span_id),
+                    "input":  [{"role": "user",      "parts": [{"text": req.prompt}]}],
+                    "output": [{"role": "assistant",  "parts": [{"text": completion}]}],
+                    "usage": {
+                        "input_tokens":  prompt_tokens,
+                        "output_tokens": completion_tokens,
+                    },
+                    "stop_reason":  "stop",
+                    "started_at":   gen_start_dt.isoformat(),
+                    "completed_at": gen_end_dt.isoformat(),
+                }]
+            }))
 
     return GenerateResponse(
         completion=completion,
